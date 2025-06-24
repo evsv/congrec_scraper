@@ -72,7 +72,7 @@ def parse_articles(article_row: pdrow) -> str:
         article_text = f.read()
 
     article_cleantext = re.sub(r"\s+", " ", article_text)
-    article_split = re.split(regex_split_pattern, article_cleantext, re.DOTALL)
+    article_split = re.split(regex_split_pattern, article_cleantext)
 
     # Getting indices of speakers and corresponding speeches in the text
     speaker_ixs = [i for i, s in enumerate(article_split) if re.search(regex_split_pattern, s)]
