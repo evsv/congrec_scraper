@@ -10,49 +10,37 @@ from pandas.core.series import Series as pdrow
 # SETTING UP
 op_rootdir = "parsed_records"
 pulled_records_ix = pd.read_csv("required_articles_index.csv")
+speaker_mapping = pd.read_csv("congressional_members.csv")
 makedirs(op_rootdir, exist_ok=True)
 
 # DEFINING FUNCTIONS
 # TODO: HANDLE THE CASES WHERE THERE"S AN EXCEPTION IN THE OUTER FUNCTION
-def proc_parsed_article(parsed_article: Dict) -> Dict:
+def proc_speech(speech_text: str) -> str:
     
-    """Helper function to perform the NLP pre-processing on the congressional record article
-    split into speaker-speeches key-value pairs. The function first removes texts that aren't
-    related to speeches by legislators (including those by the speaker), applies the en_core_web_sm
-    Spacy NLP pipeline on the text of the speech, and then returns the dictionary with the speeches
-    as Spacy pipeline corpora. 
+    """Helper function to perform the NLP pre-processing on a speech found in the congressional 
+    record article. This function is a wrapper to apply the en_core_web_sm Spacy NLP pipeline on the text of the 
+    speech, and return the tokenised speech maintaining only nouns and adjectives. 
 
     Args:
-        parsed_article (Dict): Speaker-speech key-value pair dictionary
+        speech_text (str): Text of the speech found by splitting the congressional record article
 
     Returns:
-        Dict: Speaker-speech key-value pair dictionary where the speech has been processed into a 
-        Spacy corpus object
+        str: A list of tokens from the original speech, retaining only adverbs and nouns
     """
-    # Retaining only speeches by legislators from the parsed text
-    # TODO: LOOK INTO IF THE BELOW EXCLUDING KEYS MAKE SENSE
-    orig_url = parsed_article["original_url"]
-    excluding_keys = ["the speaker", "undefined_text", "original_url"]
-    parsed_article = {key: value for key, value in parsed_article.items() 
-                      if key.lower().strip() not in excluding_keys}
-
     # Processing speeches to contain only nouns and adjectives
     nlp = spacy.load('en_core_web_sm')
-    procced_text = {}
-    for k,v in parsed_article.items():
-        
-        txt_model = nlp(v)
+    try:
+        txt_model = nlp(speech_text)
         txt_model = [[token.lemma_.lower() for token in doc 
                     if token.pos_ == "NOUN" or token.pos_ == "ADJ"]
                     for doc in txt_model.sents]
         txt_model = [sent for sent in txt_model if len(sent) > 3]
+    except Exception as e:
+        return f"Error with NLP parsing: {e}"
 
-        procced_text[k] = txt_model
-    procced_text["original_url"] = orig_url
+    return txt_model
 
-    return procced_text
-
-def parse_articles(article_row: pdrow) -> str: 
+def parse_articles(article_row: pdrow, speaker_lname_mapping: Dict) -> str: 
     """Helper function to read in a downloaded congressional record article given a filepath,
     split the article up into speeches made by different speakers, arrange the speeches into
     a dictionary based on speaker-speech key value pairs and output this dictionary as a JSON. 
@@ -63,6 +51,8 @@ def parse_articles(article_row: pdrow) -> str:
 
     Args:
         article_row (pdrow): The row of the dataframe containing the input paths for each article
+        speaker_lname_mapping (Dict): A dictionary where the keys correspond to the last name of
+                                      of the legislators, and values correspond to their party
 
     Returns:
         str: The output path of the processed article
@@ -99,24 +89,42 @@ def parse_articles(article_row: pdrow) -> str:
         return "Error in speaker-speech correspondence. Speaker index does not match speech index"
 
     # Building dictionary of speakers with speeches
-    article_dict = {article_split[spk_ix]: article_split[spch_ix] 
-                    for spk_ix, spch_ix in zip(speaker_ixs, speech_ixs)}
-    undefined_text = [article_split[i] for i in undefined_ixs]
-    article_dict["undefined_text"] = undefined_text
-    article_dict["original_url"] = article_row["article_url"]
-    
-    # Applying the NLP pipeline to the dictionary of speakers and speeches
-    procced_article = proc_parsed_article(article_dict)
+    def get_party(speaker: str, mapping: Dict) -> str:
+        procced_speaker = speaker.lower()\
+                        .replace("mr.", "").replace("ms.", "")\
+                        .strip()
+        party = mapping.get(procced_speaker, "Not Found")
+        return party
+
+    article_speeches = [{"speaker": article_split[spk_ix],
+                         "party": get_party(article_split[spk_ix], speaker_lname_mapping),
+                         "speech": proc_speech(article_split[spch_ix])}
+                        for spk_ix, spch_ix in zip(speaker_ixs, speech_ixs)]
+
+    # Removing speeches by the speaker
+    article_speeches = [speech for speech in article_speeches 
+                        if speech["speaker"].lower().strip() != "the speaker"]
 
     # Writing dictionary to JSON
     ip_f = path.split(article_row["article_fpath"])
     op_fname = ip_f[1].replace(".txt", ".json")
     op_fpath = path.join(op_rootdir, op_fname)
     with open(op_fpath, "w") as f:
-        dump(procced_article, f)
+        dump(article_speeches, f)
     
     print(f"Finished {op_fpath}")
     return op_fpath
 
-pulled_records_ix["parsed_fpaths"] = pulled_records_ix.apply(parse_articles, axis = 1)
+speaker_lname_mapping = speaker_mapping[["last_name", "chamber", "partyName"]]\
+                        .drop_duplicates()
+speaker_lname_mapping["last_name_counts"] = speaker_lname_mapping\
+                                            .groupby(["last_name", "chamber"])\
+                                            .transform("count")
+speaker_lname_mapping.loc[speaker_lname_mapping["last_name_counts"] > 1, "partyName"] = "Ambiguous"
+lname_iter = zip(speaker_lname_mapping["last_name"], speaker_lname_mapping["partyName"])
+speaker_lname_mapping = {speaker.lower(): party for speaker, party in lname_iter}
+
+pulled_records_ix["parsed_fpaths"] = pulled_records_ix.apply(parse_articles, axis = 1, 
+                                                             speaker_lname_mapping=speaker_lname_mapping)
 pulled_records_ix.to_csv("parsed_records_index.csv", index=False)
+
