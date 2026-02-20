@@ -8,10 +8,12 @@ from pandas.core.series import Series as pdrow
 
 
 # SETTING UP
-op_rootdir = "parsed_records"
-pulled_records_ix = pd.read_csv("required_articles_index.csv")
+op_rootdir = "parsed_records_onlynouns"
+pulled_records_ix = pd.read_csv("required_articles_index_new.csv")
 speaker_mapping = pd.read_csv("congressional_members.csv")
 makedirs(op_rootdir, exist_ok=True)
+makedirs(path.join(op_rootdir, "house"))
+makedirs(path.join(op_rootdir, "senate"))
 
 # DEFINING FUNCTIONS
 # TODO: HANDLE THE CASES WHERE THERE"S AN EXCEPTION IN THE OUTER FUNCTION
@@ -32,7 +34,7 @@ def proc_speech(speech_text: str) -> str:
     try:
         txt_model = nlp(speech_text)
         txt_model = [[token.lemma_.lower() for token in doc 
-                    if token.pos_ == "NOUN" or token.pos_ == "ADJ"]
+                    if token.pos_ == "NOUN"] #  or token.pos_ == "ADJ"
                     for doc in txt_model.sents]
         txt_model = [sent for sent in txt_model if len(sent) > 3]
     except Exception as e:
@@ -57,6 +59,8 @@ def parse_articles(article_row: pdrow, speaker_lname_mapping: Dict) -> str:
     Returns:
         str: The output path of the processed article
     """
+    article_folder = "house" if article_row["section"] == "House Section" else "senate"
+
     regex_split_pattern = r"(The SPEAKER|Mr\. [A-Z \-]{2,}|Ms\. [A-Z \-]{2,}|Miss [A-Z \-]{2,})"
     with open(article_row["article_fpath"], "r") as f:
         article_text = f.read()
@@ -89,15 +93,26 @@ def parse_articles(article_row: pdrow, speaker_lname_mapping: Dict) -> str:
         return "Error in speaker-speech correspondence. Speaker index does not match speech index"
 
     # Building dictionary of speakers with speeches
-    def get_party(speaker: str, mapping: Dict) -> str:
+    def get_party(speaker: str, chamber: str, mapping: Dict) -> str:
+
+        # Getting Chamber of House
+        if chamber == "Senate Section":
+            chamber_mapping = {k: v["party"] for k,v in mapping.items()
+                               if v["chamber"] == "Senate"}
+        elif chamber == "House Section":
+            chamber_mapping = {k: v["party"] for k,v in mapping.items()
+                               if v["chamber"] == "House of Representatives"}
+
+        # Getting Speaker Affiliation 
         procced_speaker = speaker.lower()\
                         .replace("mr.", "").replace("ms.", "")\
                         .strip()
-        party = mapping.get(procced_speaker, "Not Found")
+        party = chamber_mapping.get(procced_speaker, "Not Found")
         return party
 
     article_speeches = [{"speaker": article_split[spk_ix],
-                         "party": get_party(article_split[spk_ix], speaker_lname_mapping),
+                         "party": get_party(article_split[spk_ix], article_row["section"],
+                                            speaker_lname_mapping),
                          "speech": proc_speech(article_split[spch_ix])}
                         for spk_ix, spch_ix in zip(speaker_ixs, speech_ixs)]
 
@@ -108,9 +123,9 @@ def parse_articles(article_row: pdrow, speaker_lname_mapping: Dict) -> str:
     # Writing dictionary to JSON
     ip_f = path.split(article_row["article_fpath"])
     op_fname = ip_f[1].replace(".txt", ".json")
-    op_fpath = path.join(op_rootdir, op_fname)
+    op_fpath = path.join(op_rootdir, article_folder, op_fname)
     with open(op_fpath, "w") as f:
-        dump(article_speeches, f)
+        dump(article_speeches, f, indent=2)
     
     print(f"Finished {op_fpath}")
     return op_fpath
@@ -121,10 +136,12 @@ speaker_lname_mapping["last_name_counts"] = speaker_lname_mapping\
                                             .groupby(["last_name", "chamber"])\
                                             .transform("count")
 speaker_lname_mapping.loc[speaker_lname_mapping["last_name_counts"] > 1, "partyName"] = "Ambiguous"
-lname_iter = zip(speaker_lname_mapping["last_name"], speaker_lname_mapping["partyName"])
-speaker_lname_mapping = {speaker.lower(): party for speaker, party in lname_iter}
+lname_iter = zip(speaker_lname_mapping["last_name"], speaker_lname_mapping["chamber"], 
+                 speaker_lname_mapping["partyName"])
+speaker_lname_mapping = {speaker.lower(): {"party": party, "chamber": chamber} 
+                         for speaker, chamber, party in lname_iter}
 
 pulled_records_ix["parsed_fpaths"] = pulled_records_ix.apply(parse_articles, axis = 1, 
                                                              speaker_lname_mapping=speaker_lname_mapping)
-pulled_records_ix.to_csv("parsed_records_index.csv", index=False)
+pulled_records_ix.to_csv("parsed_records_index_onlynouns.csv", index=False)
 
