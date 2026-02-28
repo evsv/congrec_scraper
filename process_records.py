@@ -4,43 +4,56 @@ from json import dump
 from typing import Dict
 import pandas as pd
 import spacy
+import spacy_ngram
 from pandas.core.series import Series as pdrow
 
 
 # SETTING UP
-op_rootdir = "parsed_records_onlynouns"
+op_rootdir = "parsed_records_ngrams"
 pulled_records_ix = pd.read_csv("required_articles_index_new.csv")
 speaker_mapping = pd.read_csv("congressional_members.csv")
 makedirs(op_rootdir, exist_ok=True)
-makedirs(path.join(op_rootdir, "house"))
-makedirs(path.join(op_rootdir, "senate"))
+makedirs(path.join(op_rootdir, "house"), exist_ok=True)
+makedirs(path.join(op_rootdir, "senate"), exist_ok=True)
 
 # DEFINING FUNCTIONS
 # TODO: HANDLE THE CASES WHERE THERE"S AN EXCEPTION IN THE OUTER FUNCTION
-def proc_speech(speech_text: str) -> str:
-    
+def proc_speech(speech_text: str, ngram: int) -> str:
     """Helper function to perform the NLP pre-processing on a speech found in the congressional 
-    record article. This function is a wrapper to apply the en_core_web_sm Spacy NLP pipeline on the text of the 
-    speech, and return the tokenised speech maintaining only nouns and adjectives. 
+    record article. This function is a wrapper to apply the en_core_web_trf Spacy NLP pipeline on the text of the 
+    speech, and return the tokenised speech maintaining containing user selected n-grams 
 
     Args:
         speech_text (str): Text of the speech found by splitting the congressional record article
+        ngram (int): The length of the n-gram the user wants to retrieve
 
     Returns:
-        str: A list of tokens from the original speech, retaining only adverbs and nouns
+        str: A list of tokens from the original speech, consisting of user selected n-grams
     """
     # Processing speeches to contain only nouns and adjectives
     nlp = spacy.load('en_core_web_sm')
+    nlp.add_pipe("spacy-ngram", 
+                  config = {"sentence_level": True,
+                            "ngrams": (1, 2, 3)})
     try:
         txt_model = nlp(speech_text)
-        txt_model = [[token.lemma_.lower() for token in doc 
-                    if token.pos_ == "NOUN"] #  or token.pos_ == "ADJ"
-                    for doc in txt_model.sents]
-        txt_model = [sent for sent in txt_model if len(sent) > 3]
+        if ngram == 1:
+            txt_ngrams = [[unigram for unigram in sents._.ngram_1]
+                          for sents in txt_model.sents]
+        elif ngram == 2:
+            txt_ngrams = [[unigram for unigram in sents._.ngram_2]
+                          for sents in txt_model.sents]
+        elif ngram == 3:
+            txt_ngrams = [[unigram for unigram in sents._.ngram_3]
+                          for sents in txt_model.sents]
+        # txt_model = [[token.lemma_.lower() for token in doc 
+        #             if token.pos_ == "NOUN" or token.pos_ == "ADJ"]
+        #             for doc in txt_model.sents]
+        # txt_model = [sent for sent in txt_model if len(sent) > 3]
     except Exception as e:
         return f"Error with NLP parsing: {e}"
 
-    return txt_model
+    return txt_ngrams
 
 def parse_articles(article_row: pdrow, speaker_lname_mapping: Dict) -> str: 
     """Helper function to read in a downloaded congressional record article given a filepath,
@@ -60,7 +73,7 @@ def parse_articles(article_row: pdrow, speaker_lname_mapping: Dict) -> str:
         str: The output path of the processed article
     """
     article_folder = "house" if article_row["section"] == "House Section" else "senate"
-
+    article_ix = article_row["Unnamed: 0"]
     regex_split_pattern = r"(The SPEAKER|Mr\. [A-Z \-]{2,}|Ms\. [A-Z \-]{2,}|Miss [A-Z \-]{2,})"
     with open(article_row["article_fpath"], "r") as f:
         article_text = f.read()
@@ -113,7 +126,9 @@ def parse_articles(article_row: pdrow, speaker_lname_mapping: Dict) -> str:
     article_speeches = [{"speaker": article_split[spk_ix],
                          "party": get_party(article_split[spk_ix], article_row["section"],
                                             speaker_lname_mapping),
-                         "speech": proc_speech(article_split[spch_ix])}
+                         "speech_uni": proc_speech(article_split[spch_ix], 1),
+                         "speech_bi": proc_speech(article_split[spch_ix], 2),
+                         "speech_tri": proc_speech(article_split[spch_ix], 3)}
                         for spk_ix, spch_ix in zip(speaker_ixs, speech_ixs)]
 
     # Removing speeches by the speaker
@@ -127,7 +142,7 @@ def parse_articles(article_row: pdrow, speaker_lname_mapping: Dict) -> str:
     with open(op_fpath, "w") as f:
         dump(article_speeches, f, indent=2)
     
-    print(f"Finished {op_fpath}")
+    print(f"Finished {op_fpath}, index {article_ix}")
     return op_fpath
 
 speaker_lname_mapping = speaker_mapping[["last_name", "chamber", "partyName"]]\
@@ -143,5 +158,4 @@ speaker_lname_mapping = {speaker.lower(): {"party": party, "chamber": chamber}
 
 pulled_records_ix["parsed_fpaths"] = pulled_records_ix.apply(parse_articles, axis = 1, 
                                                              speaker_lname_mapping=speaker_lname_mapping)
-pulled_records_ix.to_csv("parsed_records_index_onlynouns.csv", index=False)
-
+pulled_records_ix.to_csv("parsed_records_index_ngrams.csv", index=False)
